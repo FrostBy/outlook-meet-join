@@ -67,13 +67,30 @@ static IMAGE_NT_HEADERS* NtHeaders(BYTE* base) {
     return nt->Signature == IMAGE_NT_SIGNATURE ? nt : NULL;
 }
 
-static bool SwapPointer(ULONG_PTR* slot, void* newFunc, void** oldFunc) {
-    if ((void*)*slot == newFunc) return false;
+static SRWLOCK g_patchLock = SRWLOCK_INIT;
+
+struct PatchGuard {
+    PatchGuard() { AcquireSRWLockExclusive(&g_patchLock); }
+    ~PatchGuard() { ReleaseSRWLockExclusive(&g_patchLock); }
+};
+
+static bool WriteProtected(void* addr, const void* value, SIZE_T size) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(addr, &mbi, sizeof(mbi))) return false;
+    const DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     DWORD oldProt = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) return false;
-    if (oldFunc && !*oldFunc) *oldFunc = (void*)*slot;
-    *slot = (ULONG_PTR)newFunc;
-    VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+    if (!VirtualProtect(addr, size, (mbi.Protect & exec) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, &oldProt)) return false;
+    memcpy(addr, value, size);
+    if (!VirtualProtect(addr, size, oldProt, &oldProt)) LogLine(L"patch: could not restore page protection");
+    return true;
+}
+
+static bool SwapPointer(ULONG_PTR* slot, void* newFunc, void** oldFunc) {
+    PatchGuard guard;
+    if ((void*)*slot == newFunc) return false;
+    void* prev = (void*)*slot;
+    if (!WriteProtected(slot, &newFunc, sizeof(void*))) return false;
+    if (oldFunc && !*oldFunc) *oldFunc = prev;
     return true;
 }
 
@@ -115,10 +132,34 @@ static bool PatchDelayIAT(HMODULE hMod, const char* libName, const char* funcNam
     return false;
 }
 
+static BYTE* g_eatBase = NULL;
+static BYTE* g_eatTramp = NULL;
+
+static BYTE* MakeTrampoline(BYTE* base, DWORD imageSize, void* target) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    ULONG_PTR gran = si.dwAllocationGranularity;
+    ULONG_PTR limit = (ULONG_PTR)base + 0x7FFF0000;
+    for (ULONG_PTR p = ((ULONG_PTR)base + imageSize + gran - 1) & ~(gran - 1); p < limit; p += gran) {
+        BYTE* m = (BYTE*)VirtualAlloc((void*)p, si.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!m) continue;
+        m[0] = 0xFF;
+        m[1] = 0x25;
+        *(DWORD*)(m + 2) = 0;
+        *(void**)(m + 6) = target;
+        DWORD oldProt = 0;
+        VirtualProtect(m, si.dwPageSize, PAGE_EXECUTE_READ, &oldProt);
+        FlushInstructionCache(GetCurrentProcess(), m, 14);
+        return m;
+    }
+    return NULL;
+}
+
 static bool PatchEAT(HMODULE hMod, const char* funcName, void* newFunc) {
     BYTE* base = (BYTE*)hMod;
     IMAGE_NT_HEADERS* nt = hMod ? NtHeaders(base) : NULL;
     if (!nt) return false;
+    if (g_eatBase && g_eatBase != base) return false;
     DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
     if (!rva) return false;
     IMAGE_EXPORT_DIRECTORY* exp = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + rva);
@@ -128,24 +169,27 @@ static bool PatchEAT(HMODULE hMod, const char* funcName, void* newFunc) {
     for (DWORD i = 0; i < exp->NumberOfNames; i++) {
         if (strcmp((const char*)(base + names[i]), funcName) != 0) continue;
         DWORD* entry = &funcs[ords[i]];
-        if ((void*)(base + *entry) == newFunc) return false;
-        DWORD oldProt = 0;
-        if (!VirtualProtect(entry, sizeof(DWORD), PAGE_READWRITE, &oldProt)) return false;
-        *entry = (DWORD)((BYTE*)newFunc - base);
-        VirtualProtect(entry, sizeof(DWORD), oldProt, &oldProt);
-        return true;
+        PatchGuard guard;
+        if (g_eatTramp && (ULONG_PTR)base + *entry == (ULONG_PTR)g_eatTramp) return false;
+        if (!g_eatTramp) {
+            g_eatTramp = MakeTrampoline(base, nt->OptionalHeader.SizeOfImage, newFunc);
+            if (!g_eatTramp) return false;
+            g_eatBase = base;
+        }
+        DWORD rvaTramp = (DWORD)((ULONG_PTR)g_eatTramp - (ULONG_PTR)base);
+        return WriteProtected(entry, &rvaTramp, sizeof(DWORD));
     }
     return false;
 }
 
 static bool PatchVtbl(void** vtbl, int index, void* newFunc, void** oldFunc) {
-    if (!vtbl || vtbl[index] == newFunc) return false;
+    if (!vtbl) return false;
+    PatchGuard guard;
+    if (vtbl[index] == newFunc) return false;
     if (oldFunc && *oldFunc && vtbl[index] != *oldFunc) return false;
-    DWORD oldProt = 0;
-    if (!VirtualProtect(&vtbl[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) return false;
-    if (oldFunc && !*oldFunc) *oldFunc = vtbl[index];
-    vtbl[index] = newFunc;
-    VirtualProtect(&vtbl[index], sizeof(void*), oldProt, &oldProt);
+    void* prev = vtbl[index];
+    if (!WriteProtected(&vtbl[index], &newFunc, sizeof(void*))) return false;
+    if (oldFunc && !*oldFunc) *oldFunc = prev;
     return true;
 }
 

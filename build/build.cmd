@@ -4,7 +4,7 @@ set "ROOT=%~dp0.."
 set "SDK=%ROOT%\build\sdk"
 set "OUT=%ROOT%\dist"
 
-if not exist "%SDK%\include\WebView2.h" (
+if not exist "%SDK%\x64\WebView2Loader.dll" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0get-sdk.ps1" || exit /b 1
 )
 
@@ -22,6 +22,11 @@ call "%VCVARS%" >nul 2>&1 || exit /b 1
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%ROOT%\build\obj" mkdir "%ROOT%\build\obj"
 cl /nologo /LD /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /I"%SDK%\include" "%ROOT%\src\loader\OutlookMeetJoin.cpp" /Fo"%ROOT%\build\obj\\" /Fe:"%OUT%\OutlookMeetJoin.dll" /link /DLL || exit /b 1
+cl /nologo /O2 /EHsc /W4 "%ROOT%\tests\loader_test.cpp" /Fo"%ROOT%\build\obj\\" /Fe:"%ROOT%\build\obj\loader_test.exe" psapi.lib || exit /b 1
+set "REAL_LOCALAPPDATA=%LOCALAPPDATA%"
+set "LOCALAPPDATA=%ROOT%\build\obj"
+"%ROOT%\build\obj\loader_test.exe" "%SDK%\x64\WebView2Loader.dll" "%OUT%\OutlookMeetJoin.dll" || exit /b 1
+set "LOCALAPPDATA=%REAL_LOCALAPPDATA%"
 copy /y "%ROOT%\src\payload\inject.js" "%OUT%\inject.js" >nul
 copy /y "%ROOT%\scripts\install.ps1" "%OUT%\install.ps1" >nul
 copy /y "%ROOT%\scripts\install.cmd" "%OUT%\install.cmd" >nul
