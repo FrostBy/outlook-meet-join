@@ -1,0 +1,11 @@
+OutlookMeetJoin
+
+The native loader (src/loader/OutlookMeetJoin.cpp) is a modified version of
+OutlookAdFix.cpp from https://github.com/alex94we/outlook-ads-remover (GPL-3.0),
+which follows the technique of https://github.com/valinet/NewOutlookPatcher (GPL-3.0).
+
+Changes: own data directory and log, UTF-8 log, no limit on hooked controllers,
+skip unknown handler vtables instead of calling a foreign original, optional
+DevTools debug flag, truncating log formatting.
+
+This project is licensed under GPL-3.0, see LICENSE.

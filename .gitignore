@@ -1,0 +1,9 @@
+build/sdk/
+build/obj/
+dist/
+*.zip
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
