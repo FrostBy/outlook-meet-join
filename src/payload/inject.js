@@ -211,7 +211,7 @@
     });
   };
 
-  new MutationObserver(refresh).observe(document.documentElement, { childList: true, subtree: true });
+  try { new MutationObserver(refresh).observe(document.documentElement || document, { childList: true, subtree: true }); } catch (e) {}
   refresh();
 
   window.__outlookMeetJoinTest = { normalize, isTel, extractFromHtml, parseEvent, scanStream, buildJoinUrl, load, emailForLink, byCardLines, byTileLabel, prune };
